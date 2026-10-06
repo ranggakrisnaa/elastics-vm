@@ -1,0 +1,85 @@
+# Local dev: app + Elasticsearch + Kibana + APM Server.
+# Prod (GCP): run only the app image and point ELASTIC_APM_SERVER_URL / SECRET_TOKEN at your APM endpoint.
+
+services:
+  app:
+    image: ${IMAGE:-apm-elastics:local}
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    ports: ["8080:8080"]
+    environment:
+      ELASTIC_APM_SERVER_URL: http://apm-server:8200
+      ELASTIC_APM_SECRET_TOKEN: ${APM_SECRET_TOKEN:-dev-secret}
+      ELASTIC_APM_SERVICE_NAME: ${SERVICE_NAME:-apm-elastics}
+      ELASTIC_APM_ENVIRONMENT: ${APM_ENV:-development}
+      # Sampling: 1.0 for dev; drop to 0.1–0.2 in prod (unsampled txns still feed metrics).
+      ELASTIC_APM_TRANSACTION_SAMPLE_RATE: ${APM_SAMPLE_RATE:-1.0}
+      # Let Kibana > APM > Agent configuration override sample rate etc. without redeploy.
+      ELASTIC_APM_CENTRAL_CONFIG: "true"
+      ELASTIC_APM_TRANSACTION_IGNORE_URLS: /healthz,/readyz,/metrics
+      ELASTIC_APM_CAPTURE_BODY: errors
+      ELASTIC_APM_CAPTURE_HEADERS: "true"
+      ELASTIC_APM_BREAKDOWN_METRICS: "true"
+      ELASTIC_APM_METRICS_INTERVAL: 30s
+      # Merge repeated fast DB/HTTP spans and drop tiny exit spans: less noise, smaller payloads.
+      ELASTIC_APM_SPAN_COMPRESSION_ENABLED: "true"
+      ELASTIC_APM_EXIT_SPAN_MIN_DURATION: 1ms
+      ELASTIC_APM_SPAN_STACK_TRACE_MIN_DURATION: 5ms
+      ELASTIC_APM_STACK_TRACE_LIMIT: "50"
+      ELASTIC_APM_TRANSACTION_MAX_SPANS: "500"
+      ELASTIC_APM_API_BUFFER_SIZE: 1mb
+      ELASTIC_APM_API_REQUEST_TIME: 10s
+      ELASTIC_APM_USE_ELASTIC_TRACEPARENT_HEADER: "false"
+      ELASTIC_APM_GLOBAL_LABELS: team=${TEAM:-platform}
+      ELASTIC_APM_LOG_LEVEL: warning
+    depends_on:
+      apm-server:
+        condition: service_started
+    restart: unless-stopped
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION:-9.2.0}
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false" # ponytail: dev only; enable security + TLS for anything shared
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    volumes: [esdata:/usr/share/elasticsearch/data]
+    ports: ["127.0.0.1:9200:9200"] # no auth: never expose publicly
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s"]
+      interval: 10s
+      retries: 30
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION:-9.2.0}
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports: ["127.0.0.1:5601:5601"] # open via SSH tunnel
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+
+  apm-server:
+    image: docker.elastic.co/apm/apm-server:${ELASTIC_VERSION:-9.2.0}
+    command: >
+      -e
+        -E apm-server.host=0.0.0.0:8200
+        -E apm-server.auth.secret_token=${APM_SECRET_TOKEN:-dev-secret}
+        -E apm-server.rum.enabled=false
+        -E apm-server.kibana.enabled=true
+        -E apm-server.kibana.host=http://kibana:5601
+        -E apm-server.agent.config.cache.expiration=30s
+        -E output.elasticsearch.hosts=["http://elasticsearch:9200"]
+        -E output.elasticsearch.flush_bytes=1mib
+        -E output.elasticsearch.flush_interval=1s
+        -E monitoring.enabled=false
+    ports: ["8200:8200"]
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+
+volumes:
+  esdata:
