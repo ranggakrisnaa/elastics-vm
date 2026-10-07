@@ -3,14 +3,14 @@
 
 services:
   app:
-    image: ${IMAGE:-apm-elastics:local}
+    image: ${IMAGE:-asia-southeast2-docker.pkg.dev/common-cicd-dev-01/gc-bribrain-dev-gar-docker-01/apm-elastics:latest}
     build:
       context: .
       args:
         VERSION: ${VERSION:-dev}
     ports: ["8080:8080"]
     environment:
-      ELASTIC_APM_SERVER_URL: http://apm-server:8200
+      ELASTIC_APM_SERVER_URL: ${APM_SERVER_URL:-http://apm-server:8200}
       ELASTIC_APM_SECRET_TOKEN: ${APM_SECRET_TOKEN:-dev-secret}
       ELASTIC_APM_SERVICE_NAME: ${SERVICE_NAME:-apm-elastics}
       ELASTIC_APM_ENVIRONMENT: ${APM_ENV:-development}
@@ -81,5 +81,25 @@ services:
     depends_on:
       elasticsearch: { condition: service_healthy }
 
+  # Shared Redis for GKE / other VMs. Port is open on 0.0.0.0: restrict with GCP firewall (docs/elastic-access.md §9).
+  redis:
+    image: redis:8-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-}
+    # Refuse to start without a password; other services still work without it set.
+    # ponytail: plaintext, no TLS. Move to Memorystore (or add TLS) if it carries sensitive data or leaves the VPC.
+    command: >
+      sh -c 'test -n "$$REDIS_PASSWORD" || { echo "REDIS_PASSWORD not set" >&2; exit 1; };
+      exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes
+      --maxmemory ${REDIS_MAXMEMORY:-512mb} --maxmemory-policy ${REDIS_EVICTION:-noeviction}'
+    ports: ["6379:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+    restart: unless-stopped
+
 volumes:
   esdata:
+  redisdata:
